@@ -1,0 +1,52 @@
+name: 8C-1D Gumar Ngram Transform Dry Run
+
+on:
+  push:
+    branches:
+      - feat/checkpoint-8c1d-gumar-dry-run
+    paths:
+      - scripts/processing/transform_gumar_ba_subset.py
+      - .github/workflows/dry-run-gumar-transform.yml
+
+permissions:
+  contents: read
+
+jobs:
+  dry-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pinned transform dependency
+        run: python -m pip install --disable-pip-version-check pyarrow==21.0.0
+
+      - name: Fetch exact verified BA archive
+        run: |
+          curl --fail --location --retry 3 --silent --show-error \
+            "https://github.com/CAMeL-Lab/Gumar-Ngrams/releases/download/v1.0/BA.tar.xz" \
+            --output "$RUNNER_TEMP/BA.tar.xz"
+
+      - name: Transform bounded 15-row ngram subset and validate
+        run: |
+          python scripts/processing/transform_gumar_ba_subset.py \
+            --archive "$RUNNER_TEMP/BA.tar.xz" \
+            --output-parquet "$RUNNER_TEMP/gumar_ba_ngram_subset.parquet" \
+            --manifest "$RUNNER_TEMP/gumar_dry_run_manifest.json"
+          python -m json.tool "$RUNNER_TEMP/gumar_dry_run_manifest.json" >/dev/null
+          test -s "$RUNNER_TEMP/gumar_ba_ngram_subset.parquet"
+
+      - name: Ensure manifest contains no source n-gram payload
+        run: |
+          ! grep -q '"raw_ngram"' "$RUNNER_TEMP/gumar_dry_run_manifest.json"
+
+      - name: Upload validation manifest only
+        uses: actions/upload-artifact@v4
+        with:
+          name: gumar-transform-dry-run-manifest
+          path: ${{ runner.temp }}/gumar_dry_run_manifest.json
+          retention-days: 14
+          if-no-files-found: error
