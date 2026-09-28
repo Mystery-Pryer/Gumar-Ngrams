@@ -1,0 +1,20 @@
+name: Runner Smoke Test
+
+on:
+  push:
+    branches:
+      - chore/runner-smoke
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Confirm hosted runner allocation
+        run: |
+          echo "runner-ok"
+          uname -a
