@@ -1,0 +1,130 @@
+name: DQE HF Bucket Bounded Read Probe
+
+on:
+  push:
+    branches:
+      - dqe/hf-bucket-ins-000013
+    paths:
+      - run-hf-probe.trigger
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Hugging Face client
+        run: python -m pip install --disable-pip-version-check --upgrade huggingface_hub
+
+      - name: Execute INS-000013 bounded read
+        run: |
+          python - <<'PY'
+          import csv
+          import hashlib
+          import io
+          import json
+          import os
+          from pathlib import Path
+          from huggingface_hub import HfFileSystem
+
+          target = "hf://buckets/Mystery-pryer/saudi-cs-eou-small-bucket/source/data/Final_data_shuffled.csv"
+          max_bytes = 65536
+          max_rows = 16
+
+          token = os.environ.get("HF_TOKEN")
+          if not token:
+              raise SystemExit("HF_TOKEN is not available")
+
+          fs = HfFileSystem(token=token, block_size=max_bytes)
+          info = fs.info(target)
+
+          with fs.open(target, "rb", block_size=max_bytes) as f:
+              prefix = f.read(max_bytes)
+
+          if len(prefix) > max_bytes:
+              raise AssertionError("read exceeded INS-000013 byte budget")
+
+          has_bom = prefix.startswith(b"\xef\xbb\xbf")
+          text = prefix.decode("utf-8-sig")
+          reader = csv.reader(io.StringIO(text), delimiter=",")
+          header = next(reader)
+
+          rows = []
+          previous_line_num = 1
+          for logical_row in range(1, max_rows + 1):
+              row = next(reader)
+              current_line_num = reader.line_num
+              if len(row) != 2:
+                  raise AssertionError(f"logical row {logical_row} has {len(row)} fields")
+              raw_text, raw_label = row
+              rows.append({
+                  "source_row_number": logical_row,
+                  "field_count": 2,
+                  "text_char_count": len(raw_text),
+                  "text_utf8_sha256": hashlib.sha256(raw_text.encode("utf-8")).hexdigest(),
+                  "label_source_lexeme": raw_label,
+                  "physical_lines_consumed": current_line_num - previous_line_num,
+              })
+              previous_line_num = current_line_num
+
+          result = {
+              "inspection_id": "INS-000013",
+              "artifact_id": "ART-000436",
+              "location_id": "LOC-000436",
+              "exact_target": target,
+              "remote_size_bytes": info.get("size"),
+              "bytes_read": len(prefix),
+              "max_bytes_allowed": max_bytes,
+              "logical_rows_read": len(rows),
+              "max_logical_rows_allowed": max_rows,
+              "utf8_sig_bom_present": has_bom,
+              "header_fields": header,
+              "delimiter": ",",
+              "first_16_rows": rows,
+              "raw_text_emitted": False,
+              "upstream_fallback_used": False,
+          }
+
+          if result["remote_size_bytes"] != 256334:
+              raise AssertionError(
+                  f"controlled object size changed: {result['remote_size_bytes']} != 256334"
+              )
+          if not has_bom:
+              raise AssertionError("expected UTF-8-SIG BOM is absent")
+          if header != ["text", "label"]:
+              raise AssertionError(f"unexpected header: {header!r}")
+          if len(rows) != 16:
+              raise AssertionError("did not parse 16 logical rows")
+
+          Path("hf_probe").mkdir(exist_ok=True)
+          Path("hf_probe/inspection_result.json").write_text(
+              json.dumps(result, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+
+          print("INS-000013 bounded read succeeded without emitting raw source text.")
+          print(json.dumps({
+              "remote_size_bytes": result["remote_size_bytes"],
+              "bytes_read": result["bytes_read"],
+              "logical_rows_read": result["logical_rows_read"],
+              "utf8_sig_bom_present": result["utf8_sig_bom_present"],
+              "header_fields": result["header_fields"],
+          }))
+          PY
+
+      - name: Upload payload-free inspection evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: ins-000013-bounded-evidence
+          path: hf_probe/inspection_result.json
+          if-no-files-found: error
+          retention-days: 7
